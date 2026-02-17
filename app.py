@@ -3,7 +3,6 @@ import PyPDF2
 import re
 import json
 from datetime import datetime
-import io
 
 # ----------------------------------------------------------------------
 # Funciones de utilidad
@@ -468,7 +467,7 @@ def procesar_historia(texto):
 # ----------------------------------------------------------------------
 st.set_page_config(page_title="Lector HC Preciso", page_icon="🩺", layout="wide")
 st.title("🩺 Lector de Historias Clínicas (Precisión Mejorada)")
-st.mark("Sube un archivo PDF de una historia clínica y obtén un reporte detallado con todos los elementos facturables.")
+st.markdown("Sube un archivo PDF de una historia clínica y obtén un reporte detallado con todos los elementos facturables.")
 
 MAX_MB = 200
 archivo_subido = st.file_uploader("Selecciona un archivo PDF", type="pdf")
