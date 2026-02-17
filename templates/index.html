@@ -1,1 +1,194 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lector de Historias Clínicas PDF</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #555;
+        }
+        input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #fafafa;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+        }
+        .error {
+            color: #f44336;
+            margin-top: 10px;
+        }
+        .success {
+            color: #4CAF50;
+            margin-top: 10px;
+        }
+        .info {
+            color: #2196F3;
+            margin-top: 10px;
+        }
+        .result {
+            margin-top: 30px;
+            padding: 20px;
+            background-color: #e3f2fd;
+            border-radius: 4px;
+            display: none;
+        }
+        .result pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            background-color: white;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .download-btn {
+            display: inline-block;
+            background-color: #2196F3;
+            color: white;
+            padding: 8px 16px;
+            text-decoration: none;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .download-btn:hover {
+            background-color: #0b7dda;
+        }
+    </style>
+</head>
+<body>
+    <h1>📄 Lector de Historias Clínicas</h1>
+    <div class="container">
+        <div class="form-group">
+            <label for="pdfFile">Selecciona un archivo PDF (máx. 200 MB):</label>
+            <input type="file" id="pdfFile" accept=".pdf">
+            <div id="fileError" class="error"></div>
+        </div>
+        <button onclick="subirArchivo()">Procesar PDF</button>
+        <div id="loading" class="loading">
+            <p>⏳ Procesando... Esto puede tomar unos segundos.</p>
+        </div>
+        <div id="message" class="info" style="display:none;"></div>
+        <div id="resultContainer" class="result">
+            <h3>Resultado de la extracción:</h3>
+            <pre id="jsonResult"></pre>
+            <a id="downloadLink" href="#" class="download-btn" download="reporte.json">📥 Descargar JSON</a>
+        </div>
+    </div>
 
+    <script>
+        function mostrarError(elemento, mensaje) {
+            document.getElementById(elemento).innerText = mensaje;
+            document.getElementById(elemento).style.display = 'block';
+        }
+
+        function ocultarElemento(id) {
+            document.getElementById(id).style.display = 'none';
+        }
+
+        function mostrarElemento(id) {
+            document.getElementById(id).style.display = 'block';
+        }
+
+        function subirArchivo() {
+            const fileInput = document.getElementById('pdfFile');
+            const file = fileInput.files[0];
+            
+            // Limpiar mensajes previos
+            ocultarElemento('fileError');
+            ocultarElemento('message');
+            ocultarElemento('resultContainer');
+            
+            if (!file) {
+                mostrarError('fileError', 'Por favor selecciona un archivo.');
+                return;
+            }
+            
+            // Validar extensión
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                mostrarError('fileError', 'El archivo debe ser un PDF.');
+                return;
+            }
+            
+            // Validar tamaño (200 MB = 200 * 1024 * 1024 bytes)
+            const maxSize = 200 * 1024 * 1024;
+            if (file.size > maxSize) {
+                mostrarError('fileError', 'El archivo excede el tamaño máximo de 200 MB.');
+                return;
+            }
+            
+            // Mostrar loading
+            mostrarElemento('loading');
+            
+            const formData = new FormData();
+            formData.append('pdf', file);
+            
+            fetch('/procesar', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                ocultarElemento('loading');
+                if (data.error) {
+                    mostrarError('message', 'Error: ' + data.error);
+                } else {
+                    // Mostrar resultado
+                    document.getElementById('jsonResult').innerText = JSON.stringify(data, null, 2);
+                    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    document.getElementById('downloadLink').href = url;
+                    mostrarElemento('resultContainer');
+                }
+            })
+            .catch(error => {
+                ocultarElemento('loading');
+                mostrarError('message', 'Error en la conexión: ' + error);
+            });
+        }
+    </script>
+</body>
+</html>
