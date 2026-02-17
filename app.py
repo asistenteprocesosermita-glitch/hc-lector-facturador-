@@ -1,56 +1,43 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Aplicación web para cargar historias clínicas en PDF y extraer información facturable.
-Máximo tamaño de archivo: 200 MB.
-"""
-
-import os
+import streamlit as st
+import PyPDF2
 import re
 import json
-import tempfile
-from flask import Flask, request, render_template_string, jsonify, send_file
-import PyPDF2
-from werkzeug.utils import secure_filename
-
-# Configuración de la aplicación
-app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200 MB
-app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
-app.config['SECRET_KEY'] = 'clave-secreta-para-sesiones'
-
-# Extensiones permitidas
-ALLOWED_EXTENSIONS = {'pdf'}
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+import io
+import time
 
 # ----------------------------------------------------------------------
-# Funciones de extracción (adaptadas de lector_pdf.py)
+# Funciones de extracción (adaptadas del script original)
 # ----------------------------------------------------------------------
 
 def limpiar_texto(texto):
+    """Elimina espacios y saltos de línea redundantes."""
     return re.sub(r'\n\s*\n', '\n', texto.strip())
 
 def extraer_paciente(texto):
+    """Extrae datos básicos del paciente: documento, nombre, fecha nacimiento, edad."""
     paciente = {}
+    # Documento (CC)
     doc = re.search(r'CC\s*(\d+)', texto)
     if doc:
         paciente['documento'] = doc.group(1)
+    # Nombre (entre '--' y 'Fec. Nacimiento')
     nombre = re.search(r'--\s*([A-ZÁÉÍÓÚÑ\s]+?)\s+Fec\.\s*Nacimiento', texto)
     if nombre:
         paciente['nombre'] = nombre.group(1).strip()
+    # Fecha de nacimiento
     fn = re.search(r'Fec\.\s*Nacimiento:\s*(\d{2}/\d{2}/\d{4})', texto)
     if fn:
         paciente['fecha_nacimiento'] = fn.group(1)
+    # Edad
     edad = re.search(r'Edad\s*actual:\s*(\d+)\s*AÑOS', texto)
     if edad:
         paciente['edad'] = int(edad.group(1))
     return paciente
 
 def extraer_servicios(texto):
+    """Extrae registros de atención (servicios) con fecha, hora y tipo."""
     servicios = []
+    # Patrón típico: SEDE DE ATENCION 0304 ... FOLIO ... FECHA ... TIPO DE ATENCION : ...
     pattern = r'SEDE DE ATENCION\s+(\d+)\s+([^\n]+?)\s+FOLIO\s+\d+\s+FECHA\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})\s+TIPO DE ATENCION\s*:\s*([^\n]+)'
     for match in re.finditer(pattern, texto, re.IGNORECASE):
         servicios.append({
@@ -63,6 +50,7 @@ def extraer_servicios(texto):
     return servicios
 
 def extraer_medicamentos(texto):
+    """Extrae fórmulas médicas estándar."""
     medicamentos = []
     bloques = re.split(r'FORMULA MEDICA ESTANDAR', texto)
     for bloque in bloques[1:]:
@@ -71,6 +59,7 @@ def extraer_medicamentos(texto):
             bloque = bloque[:fin.start()]
         lineas = bloque.split('\n')
         for i, linea in enumerate(lineas):
+            # Busca líneas que empiecen con cantidad (ej. "1.00  NOMBRE")
             if re.match(r'\s*\d+\.\d+\s+[A-Za-z0-9]', linea):
                 partes = linea.strip().split(maxsplit=1)
                 if len(partes) >= 2:
@@ -78,12 +67,14 @@ def extraer_medicamentos(texto):
                     desc = partes[1]
                 else:
                     continue
+                # Intenta capturar dosis en la siguiente línea
                 dosis = ''
                 if i+1 < len(lineas):
                     prox = lineas[i+1].strip()
                     if re.match(r'\d+[.,]?\d*\s*(MG|ML|G|MCG)', prox, re.IGNORECASE):
                         dosis = prox
                         desc += ' ' + prox
+                # Busca frecuencia en las siguientes líneas
                 freq = ''
                 for j in range(i, min(i+5, len(lineas))):
                     if 'Frecuencia' in lineas[j]:
@@ -98,7 +89,9 @@ def extraer_medicamentos(texto):
     return medicamentos
 
 def extraer_procedimientos(texto):
+    """Extrae procedimientos quirúrgicos y no quirúrgicos."""
     procedimientos = []
+    # Quirúrgicos
     pattern_qx = r'PROCEDIMIENTOS QUIRURGICOS\s*\n\s*(\d+)\s+([^\n]+)'
     for match in re.finditer(pattern_qx, texto, re.IGNORECASE):
         procedimientos.append({
@@ -106,6 +99,7 @@ def extraer_procedimientos(texto):
             'cantidad': match.group(1),
             'descripcion': match.group(2).strip()
         })
+    # No quirúrgicos
     pattern_noqx = r'ORDENES DE PROCEDIMIENTOS NO QX\s*\n\s*(\d+)\s+([^\n]+)'
     for match in re.finditer(pattern_noqx, texto, re.IGNORECASE):
         procedimientos.append({
@@ -116,6 +110,7 @@ def extraer_procedimientos(texto):
     return procedimientos
 
 def extraer_laboratorios(texto):
+    """Extrae órdenes de laboratorio."""
     laboratorios = []
     bloques = re.split(r'ORDENES DE LABORATORIO', texto)
     for bloque in bloques[1:]:
@@ -134,6 +129,7 @@ def extraer_laboratorios(texto):
     return laboratorios
 
 def extraer_imagenes(texto):
+    """Extrae órdenes de imágenes diagnósticas."""
     imagenes = []
     bloques = re.split(r'ORDENES DE IMAGENES DIAGNOSTICAS', texto)
     for bloque in bloques[1:]:
@@ -151,149 +147,83 @@ def extraer_imagenes(texto):
                     })
     return imagenes
 
-def extraer_texto_pdf(ruta_pdf):
+# ----------------------------------------------------------------------
+# Función para extraer texto del PDF
+# ----------------------------------------------------------------------
+def extraer_texto_pdf(archivo_pdf):
+    """Extrae todo el texto de un archivo PDF usando PyPDF2."""
     texto = ""
     try:
-        with open(ruta_pdf, 'rb') as archivo:
-            lector = PyPDF2.PdfReader(archivo)
-            num_paginas = len(lector.pages)
-            for pagina in lector.pages:
-                texto_pagina = pagina.extract_text()
-                if texto_pagina:
-                    texto += texto_pagina + "\n"
+        lector = PyPDF2.PdfReader(archivo_pdf)
+        num_paginas = len(lector.pages)
+        for i, pagina in enumerate(lector.pages):
+            texto_pagina = pagina.extract_text()
+            if texto_pagina:
+                texto += texto_pagina + "\n"
+        return texto, num_paginas
     except Exception as e:
-        raise Exception(f"Error al leer el PDF: {e}")
-    return texto
-
-def procesar_pdf(ruta_pdf):
-    contenido = extraer_texto_pdf(ruta_pdf)
-    contenido = limpiar_texto(contenido)
-    resultado = {
-        'paciente': extraer_paciente(contenido),
-        'servicios': extraer_servicios(contenido),
-        'medicamentos': extraer_medicamentos(contenido),
-        'procedimientos': extraer_procedimientos(contenido),
-        'laboratorios': extraer_laboratorios(contenido),
-        'imagenes': extraer_imagenes(contenido)
-    }
-    return resultado
+        st.error(f"Error al leer el PDF: {e}")
+        return None, 0
 
 # ----------------------------------------------------------------------
-# Plantilla HTML (incrustada para simplicidad)
+# Interfaz de Streamlit
 # ----------------------------------------------------------------------
-HTML_TEMPLATE = """
-<!doctype html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Lector de Historias Clínicas</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        h1 { color: #333; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 5px; font-weight: bold; }
-        input[type="file"] { padding: 8px; border: 1px solid #ccc; border-radius: 4px; width: 100%; }
-        button { background-color: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background-color: #45a049; }
-        .error { color: red; margin-top: 10px; }
-        .success { color: green; margin-top: 10px; }
-        .info { color: #555; margin-top: 10px; }
-    </style>
-</head>
-<body>
-    <h1>📄 Lector de Historias Clínicas</h1>
-    <p>Carga un archivo PDF (máximo 200 MB) y extrae automáticamente la información facturable.</p>
-    <form method="post" enctype="multipart/form-data" action="/">
-        <div class="form-group">
-            <label for="file">Seleccionar archivo PDF:</label>
-            <input type="file" name="file" accept=".pdf" required>
-        </div>
-        <button type="submit">Procesar</button>
-    </form>
-    {% if error %}
-    <div class="error">❌ {{ error }}</div>
-    {% endif %}
-    {% if success %}
-    <div class="success">✅ {{ success }}</div>
-    <div class="info">
-        <strong>Resumen:</strong> {{ servicios }} servicios, {{ medicamentos }} medicamentos, 
-        {{ procedimientos }} procedimientos, {{ laboratorios }} laboratorios, {{ imagenes }} imágenes.
-    </div>
-    <p><a href="/download/{{ filename }}" target="_blank">📥 Descargar reporte JSON</a></p>
-    {% endif %}
-</body>
-</html>
-"""
+st.set_page_config(page_title="Lector de Historias Clínicas", page_icon="📄")
+st.title("📄 Lector de Historias Clínicas")
+st.markdown("Sube un archivo PDF de una historia clínica (máx. 200 MB) y obtén un reporte JSON con la información facturable.")
 
-# ----------------------------------------------------------------------
-# Rutas de la aplicación
-# ----------------------------------------------------------------------
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    if request.method == 'POST':
-        # Verificar que se envió un archivo
-        if 'file' not in request.files:
-            return render_template_string(HTML_TEMPLATE, error="No se seleccionó ningún archivo.")
-        file = request.files['file']
-        if file.filename == '':
-            return render_template_string(HTML_TEMPLATE, error="El archivo está vacío.")
-        if not allowed_file(file.filename):
-            return render_template_string(HTML_TEMPLATE, error="Tipo de archivo no permitido. Solo PDF.")
+# Límite de 200 MB
+MAX_MB = 200
+archivo_subido = st.file_uploader("Selecciona un archivo PDF", type="pdf", accept_multiple_files=False)
 
-        # Guardar el archivo temporalmente
-        filename = secure_filename(file.filename)
-        ruta_temp = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(ruta_temp)
-
-        try:
-            # Procesar el PDF
-            resultado = procesar_pdf(ruta_temp)
-
-            # Guardar el resultado en un archivo JSON en la misma carpeta temporal
-            json_filename = os.path.splitext(filename)[0] + '.json'
-            json_path = os.path.join(app.config['UPLOAD_FOLDER'], json_filename)
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(resultado, f, indent=2, ensure_ascii=False)
-
-            # Preparar resumen para mostrar
-            servicios = len(resultado.get('servicios', []))
-            medicamentos = len(resultado.get('medicamentos', []))
-            procedimientos = len(resultado.get('procedimientos', []))
-            laboratorios = len(resultado.get('laboratorios', []))
-            imagenes = len(resultado.get('imagenes', []))
-
-            return render_template_string(
-                HTML_TEMPLATE,
-                success="Archivo procesado correctamente.",
-                filename=json_filename,
-                servicios=servicios,
-                medicamentos=medicamentos,
-                procedimientos=procedimientos,
-                laboratorios=laboratorios,
-                imagenes=imagenes
-            )
-        except Exception as e:
-            return render_template_string(HTML_TEMPLATE, error=str(e))
-        finally:
-            # Limpiar archivo PDF temporal (opcional)
-            if os.path.exists(ruta_temp):
-                os.remove(ruta_temp)
-
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/download/<filename>')
-def download(filename):
-    """Descarga el archivo JSON generado."""
-    json_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    if os.path.exists(json_path):
-        return send_file(json_path, as_attachment=True, download_name=filename)
+if archivo_subido is not None:
+    # Verificar tamaño
+    tamaño_bytes = archivo_subido.size
+    tamaño_mb = tamaño_bytes / (1024 * 1024)
+    if tamaño_mb > MAX_MB:
+        st.error(f"El archivo excede el tamaño máximo de {MAX_MB} MB ({tamaño_mb:.2f} MB).")
     else:
-        return "Archivo no encontrado", 404
-
-# ----------------------------------------------------------------------
-# Punto de entrada
-# ----------------------------------------------------------------------
-if __name__ == '__main__':
-    # Ejecutar la aplicación en modo debug (solo para pruebas locales)
-    app.run(debug=True, host='0.0.0.0', port=5000)
+        st.success(f"Archivo cargado: {archivo_subido.name} ({tamaño_mb:.2f} MB)")
+        
+        # Botón para procesar
+        if st.button("🔍 Procesar PDF"):
+            with st.spinner("Extrayendo texto del PDF..."):
+                texto, num_paginas = extraer_texto_pdf(archivo_subido)
+                if texto is None:
+                    st.stop()
+                st.info(f"Se extrajeron {num_paginas} páginas.")
+            
+            with st.spinner("Analizando información..."):
+                texto_limpio = limpiar_texto(texto)
+                
+                resultado = {
+                    'paciente': extraer_paciente(texto_limpio),
+                    'servicios': extraer_servicios(texto_limpio),
+                    'medicamentos': extraer_medicamentos(texto_limpio),
+                    'procedimientos': extraer_procedimientos(texto_limpio),
+                    'laboratorios': extraer_laboratorios(texto_limpio),
+                    'imagenes': extraer_imagenes(texto_limpio)
+                }
+                
+                # Mostrar resumen
+                st.success("✅ Extracción completada")
+                st.write(f"**Paciente:** {resultado['paciente'].get('nombre', 'No encontrado')}")
+                st.write(f"**Documento:** {resultado['paciente'].get('documento', 'No encontrado')}")
+                st.write(f"**Servicios:** {len(resultado['servicios'])}")
+                st.write(f"**Medicamentos:** {len(resultado['medicamentos'])}")
+                st.write(f"**Procedimientos:** {len(resultado['procedimientos'])}")
+                st.write(f"**Laboratorios:** {len(resultado['laboratorios'])}")
+                st.write(f"**Imágenes:** {len(resultado['imagenes'])}")
+                
+                # Mostrar JSON y descarga
+                with st.expander("Ver JSON completo"):
+                    st.json(resultado)
+                
+                # Convertir a JSON y ofrecer descarga
+                json_str = json.dumps(resultado, indent=2, ensure_ascii=False)
+                st.download_button(
+                    label="📥 Descargar JSON",
+                    data=json_str,
+                    file_name=f"{archivo_subido.name.replace('.pdf', '')}_reporte.json",
+                    mime="application/json"
+                )
