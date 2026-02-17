@@ -2,133 +2,18 @@ import streamlit as st
 import PyPDF2
 import re
 import json
+from datetime import datetime
+import io
 
 # ----------------------------------------------------------------------
-# Funciones de extracción (iguales)
+# Funciones de utilidad
 # ----------------------------------------------------------------------
-
 def limpiar_texto(texto):
+    """Elimina líneas vacías múltiples y espacios redundantes."""
     return re.sub(r'\n\s*\n', '\n', texto.strip())
 
-def extraer_paciente(texto):
-    paciente = {}
-    doc = re.search(r'CC\s*(\d+)', texto)
-    if doc:
-        paciente['documento'] = doc.group(1)
-    nombre = re.search(r'--\s*([A-ZÁÉÍÓÚÑ\s]+?)\s+Fec\.\s*Nacimiento', texto)
-    if nombre:
-        paciente['nombre'] = nombre.group(1).strip()
-    fn = re.search(r'Fec\.\s*Nacimiento:\s*(\d{2}/\d{2}/\d{4})', texto)
-    if fn:
-        paciente['fecha_nacimiento'] = fn.group(1)
-    edad = re.search(r'Edad\s*actual:\s*(\d+)\s*AÑOS', texto)
-    if edad:
-        paciente['edad'] = int(edad.group(1))
-    return paciente
-
-def extraer_servicios(texto):
-    servicios = []
-    pattern = r'SEDE DE ATENCION\s+(\d+)\s+([^\n]+?)\s+FOLIO\s+\d+\s+FECHA\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})\s+TIPO DE ATENCION\s*:\s*([^\n]+)'
-    for match in re.finditer(pattern, texto, re.IGNORECASE):
-        servicios.append({
-            'sede_codigo': match.group(1),
-            'sede_nombre': match.group(2).strip(),
-            'fecha': match.group(3),
-            'hora': match.group(4),
-            'tipo_atencion': match.group(5).strip()
-        })
-    return servicios
-
-def extraer_medicamentos(texto):
-    medicamentos = []
-    bloques = re.split(r'FORMULA MEDICA ESTANDAR', texto)
-    for bloque in bloques[1:]:
-        fin = re.search(r'\n[A-Z ]+\n', bloque)
-        if fin:
-            bloque = bloque[:fin.start()]
-        lineas = bloque.split('\n')
-        for i, linea in enumerate(lineas):
-            if re.match(r'\s*\d+\.\d+\s+[A-Za-z0-9]', linea):
-                partes = linea.strip().split(maxsplit=1)
-                if len(partes) >= 2:
-                    cantidad = partes[0]
-                    desc = partes[1]
-                else:
-                    continue
-                dosis = ''
-                if i+1 < len(lineas):
-                    prox = lineas[i+1].strip()
-                    if re.match(r'\d+[.,]?\d*\s*(MG|ML|G|MCG)', prox, re.IGNORECASE):
-                        dosis = prox
-                        desc += ' ' + prox
-                freq = ''
-                for j in range(i, min(i+5, len(lineas))):
-                    if 'Frecuencia' in lineas[j]:
-                        freq = lineas[j].strip()
-                        break
-                medicamentos.append({
-                    'cantidad': cantidad,
-                    'descripcion': desc,
-                    'dosis': dosis,
-                    'frecuencia': freq
-                })
-    return medicamentos
-
-def extraer_procedimientos(texto):
-    procedimientos = []
-    pattern_qx = r'PROCEDIMIENTOS QUIRURGICOS\s*\n\s*(\d+)\s+([^\n]+)'
-    for match in re.finditer(pattern_qx, texto, re.IGNORECASE):
-        procedimientos.append({
-            'tipo': 'quirurgico',
-            'cantidad': match.group(1),
-            'descripcion': match.group(2).strip()
-        })
-    pattern_noqx = r'ORDENES DE PROCEDIMIENTOS NO QX\s*\n\s*(\d+)\s+([^\n]+)'
-    for match in re.finditer(pattern_noqx, texto, re.IGNORECASE):
-        procedimientos.append({
-            'tipo': 'no_quirurgico',
-            'cantidad': match.group(1),
-            'descripcion': match.group(2).strip()
-        })
-    return procedimientos
-
-def extraer_laboratorios(texto):
-    laboratorios = []
-    bloques = re.split(r'ORDENES DE LABORATORIO', texto)
-    for bloque in bloques[1:]:
-        fin = re.search(r'\n[A-Z ]+\n', bloque)
-        if fin:
-            bloque = bloque[:fin.start()]
-        lineas = bloque.split('\n')
-        for linea in lineas:
-            if re.match(r'\s*\d+\s+[A-Za-z]', linea):
-                partes = linea.strip().split(maxsplit=1)
-                if len(partes) >= 2:
-                    laboratorios.append({
-                        'cantidad': partes[0],
-                        'descripcion': partes[1]
-                    })
-    return laboratorios
-
-def extraer_imagenes(texto):
-    imagenes = []
-    bloques = re.split(r'ORDENES DE IMAGENES DIAGNOSTICAS', texto)
-    for bloque in bloques[1:]:
-        fin = re.search(r'\n[A-Z ]+\n', bloque)
-        if fin:
-            bloque = bloque[:fin.start()]
-        lineas = bloque.split('\n')
-        for linea in lineas:
-            if re.match(r'\s*\d+\s+[A-Za-z]', linea):
-                partes = linea.strip().split(maxsplit=1)
-                if len(partes) >= 2:
-                    imagenes.append({
-                        'cantidad': partes[0],
-                        'descripcion': partes[1]
-                    })
-    return imagenes
-
 def extraer_texto_pdf(archivo_pdf):
+    """Extrae texto de un archivo PDF."""
     texto = ""
     try:
         lector = PyPDF2.PdfReader(archivo_pdf)
@@ -142,12 +27,448 @@ def extraer_texto_pdf(archivo_pdf):
         st.error(f"Error al leer el PDF: {e}")
         return None, 0
 
+def formatear_fecha(fecha_str):
+    """Convierte fecha DD/MM/AAAA a AAAA-MM-DD para ordenamiento."""
+    try:
+        return datetime.strptime(fecha_str, '%d/%m/%Y').date().isoformat()
+    except:
+        return fecha_str
+
 # ----------------------------------------------------------------------
-# Interfaz de Streamlit (sin expanders, todo visible)
+# Funciones de extracción mejoradas
 # ----------------------------------------------------------------------
-st.set_page_config(page_title="Lector de Historias Clínicas", page_icon="📄", layout="wide")
-st.title("📄 Lector de Historias Clínicas")
-st.markdown("Sube un archivo PDF de una historia clínica (máx. 200 MB) y obtén un reporte con los elementos facturables.")
+def extraer_paciente(texto):
+    """Extrae datos básicos del paciente."""
+    paciente = {}
+    # Documento
+    doc = re.search(r'CC\s*(\d+)', texto)
+    if doc:
+        paciente['documento'] = doc.group(1)
+    # Nombre
+    nombre = re.search(r'--\s*([A-ZÁÉÍÓÚÑ\s]+?)\s+Fec\.\s*Nacimiento', texto)
+    if nombre:
+        paciente['nombre'] = nombre.group(1).strip()
+    # Fecha nacimiento
+    fn = re.search(r'Fec\.\s*Nacimiento:\s*(\d{2}/\d{2}/\d{4})', texto)
+    if fn:
+        paciente['fecha_nacimiento'] = fn.group(1)
+    # Edad
+    edad = re.search(r'Edad\s*actual:\s*(\d+)\s*AÑOS', texto)
+    if edad:
+        paciente['edad'] = int(edad.group(1))
+    # Teléfono
+    tel = re.search(r'Teléfono:\s*(\d+)', texto)
+    if tel:
+        paciente['telefono'] = tel.group(1)
+    # Dirección
+    dire = re.search(r'Dirección:\s*([^\n]+)', texto)
+    if dire:
+        paciente['direccion'] = dire.group(1).strip()
+    return paciente
+
+def extraer_servicios(texto):
+    """Extrae todos los registros de atención (ingresos a servicios)."""
+    servicios = []
+    # Patrón principal
+    pattern = r'SEDE DE ATENCION\s+(\d+)\s+([^\n]+?)\s+FOLIO\s+\d+\s+FECHA\s+(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})\s+TIPO DE ATENCION\s*:\s*([^\n]+)'
+    for match in re.finditer(pattern, texto, re.IGNORECASE):
+        servicios.append({
+            'sede_codigo': match.group(1),
+            'sede_nombre': match.group(2).strip(),
+            'fecha': match.group(3),
+            'hora': match.group(4),
+            'tipo_atencion': match.group(5).strip()
+        })
+    return servicios
+
+def extraer_diagnosticos(texto):
+    """Extrae diagnósticos con códigos CIE-10."""
+    diagnosticos = []
+    # Busca bloques DIAGNÓSTICO o similar
+    patron = r'(?:DIAGN[OÓ]STICO|DX|DIAGN[OÓ]STICOS?)\s*:?\s*([A-Z0-9]+\s+[^\n]+)'
+    for match in re.finditer(patron, texto, re.IGNORECASE):
+        diag = match.group(1).strip()
+        # Puede contener código y texto
+        codigo = re.search(r'([A-Z]\d{2,3})', diag)
+        diagnosticos.append({
+            'codigo': codigo.group(1) if codigo else '',
+            'descripcion': diag
+        })
+    return diagnosticos
+
+def extraer_medicamentos(texto):
+    """
+    Extrae medicamentos de:
+    - FORMULA MEDICA ESTANDAR
+    - CONCILIACIÓN MEDICAMENTOSA
+    - PLAN TERAPEUTICO (listados de medicamentos)
+    """
+    medicamentos = []
+
+    # Función auxiliar para procesar líneas de medicamento
+    def procesar_linea_med(linea):
+        # Busca patrón: cantidad (opcional) + nombre + dosis
+        # Ej: "1.00  PIPERACILINA SODICA + TAZOBACTAN SODICO 4.5 G POLVO LIOFILIZADO 4.5 g"
+        partes = linea.strip().split(maxsplit=1)
+        if len(partes) < 2:
+            return None
+        cantidad = partes[0] if re.match(r'^\d+\.?\d*$', partes[0]) else '1'
+        desc = partes[1]
+        # Extraer dosis al final (si hay números y unidades)
+        dosis_match = re.search(r'(\d+[.,]?\d*\s*(?:MG|ML|G|MCG|UI))', desc, re.IGNORECASE)
+        dosis = dosis_match.group(1) if dosis_match else ''
+        return {
+            'cantidad': cantidad,
+            'descripcion': desc,
+            'dosis': dosis,
+            'frecuencia': '',
+            'via': '',
+            'estado': ''
+        }
+
+    # 1. Bloques FORMULA MEDICA ESTANDAR
+    bloques_fm = re.split(r'FORMULA MEDICA ESTANDAR', texto)
+    for bloque in bloques_fm[1:]:
+        fin = re.search(r'\n[A-Z ]{5,}\n', bloque)
+        if fin:
+            bloque = bloque[:fin.start()]
+        lineas = bloque.split('\n')
+        i = 0
+        while i < len(lineas):
+            linea = lineas[i].strip()
+            if not linea:
+                i += 1
+                continue
+            if re.match(r'^\s*\d+\.?\d*\s+[A-Za-z0-9]', linea):
+                med = procesar_linea_med(linea)
+                if med:
+                    # Buscar frecuencia y vía en líneas siguientes
+                    for j in range(i, min(i+5, len(lineas))):
+                        if 'Frecuencia' in lineas[j]:
+                            med['frecuencia'] = lineas[j].strip()
+                        if 'Via' in lineas[j]:
+                            med['via'] = lineas[j].strip()
+                        if 'Estado:' in lineas[j]:
+                            med['estado'] = lineas[j].strip()
+                    medicamentos.append(med)
+            i += 1
+
+    # 2. Bloques CONCILIACIÓN MEDICAMENTOSA
+    bloques_conc = re.split(r'CONCILIACI[OÓ]N MEDICAMENTOSA', texto, re.IGNORECASE)
+    for bloque in bloques_conc[1:]:
+        fin = re.search(r'\n[A-Z ]{5,}\n', bloque)
+        if fin:
+            bloque = bloque[:fin.start()]
+        lineas = bloque.split('\n')
+        for linea in lineas:
+            linea = linea.strip()
+            if not linea:
+                continue
+            # Busca líneas como "ASA 100 MG VO CADA 24 HORAS"
+            if re.search(r'\d+\s*(?:MG|ML|G|MCG)', linea, re.IGNORECASE):
+                med = {
+                    'cantidad': '1',
+                    'descripcion': linea,
+                    'dosis': '',
+                    'frecuencia': '',
+                    'via': '',
+                    'estado': ''
+                }
+                # Extraer dosis
+                dosis_match = re.search(r'(\d+[.,]?\d*\s*(?:MG|ML|G|MCG))', linea, re.IGNORECASE)
+                if dosis_match:
+                    med['dosis'] = dosis_match.group(1)
+                # Extraer vía (VO, IV, SC, etc.)
+                via_match = re.search(r'\b(VO|IV|SC|IM|ORAL|INTRAVENOSO|SUBCUTANEA)\b', linea, re.IGNORECASE)
+                if via_match:
+                    med['via'] = via_match.group(1)
+                # Extraer frecuencia (CADA X HORAS, DIA, etc.)
+                freq_match = re.search(r'(CADA\s+\d+\s+HORAS|CADA\s+\d+H|CADA\s+\d+\s+DÍAS?|DIARIO|UNA\s+VEZ\s+AL\s+DÍA)', linea, re.IGNORECASE)
+                if freq_match:
+                    med['frecuencia'] = freq_match.group(1)
+                medicamentos.append(med)
+
+    # 3. PLAN - TERAPEUTICO (líneas con guiones)
+    bloques_plan = re.split(r'PLAN\s*[-:]?\s*TERAPEUTICO', texto, re.IGNORECASE)
+    for bloque in bloques_plan[1:]:
+        fin = re.search(r'\n[A-Z ]{5,}\n', bloque)
+        if fin:
+            bloque = bloque[:fin.start()]
+        lineas = bloque.split('\n')
+        for linea in lineas:
+            linea = linea.strip()
+            if not linea or not linea.startswith('-'):
+                continue
+            # Quita el guión
+            linea = linea[1:].strip()
+            if re.search(r'\d+\s*(?:MG|ML|G|MCG)', linea, re.IGNORECASE):
+                med = {
+                    'cantidad': '1',
+                    'descripcion': linea,
+                    'dosis': '',
+                    'frecuencia': '',
+                    'via': '',
+                    'estado': ''
+                }
+                dosis_match = re.search(r'(\d+[.,]?\d*\s*(?:MG|ML|G|MCG))', linea, re.IGNORECASE)
+                if dosis_match:
+                    med['dosis'] = dosis_match.group(1)
+                via_match = re.search(r'\b(VO|IV|SC|IM|ORAL|INTRAVENOSO|SUBCUTANEA)\b', linea, re.IGNORECASE)
+                if via_match:
+                    med['via'] = via_match.group(1)
+                freq_match = re.search(r'(CADA\s+\d+\s+HORAS|CADA\s+\d+H|CADA\s+\d+\s+DÍAS?|DIARIO|UNA\s+VEZ\s+AL\s+DÍA)', linea, re.IGNORECASE)
+                if freq_match:
+                    med['frecuencia'] = freq_match.group(1)
+                medicamentos.append(med)
+
+    return medicamentos
+
+def extraer_procedimientos(texto):
+    """Extrae procedimientos quirúrgicos y no quirúrgicos con fechas."""
+    procedimientos = []
+
+    # Procedimientos quirúrgicos
+    pattern_qx = r'PROCEDIMIENTOS QUIRURGICOS\s*\n\s*(\d+)\s+([^\n]+)'
+    for match in re.finditer(pattern_qx, texto, re.IGNORECASE):
+        procedimientos.append({
+            'tipo': 'quirurgico',
+            'cantidad': match.group(1).strip(),
+            'descripcion': match.group(2).strip(),
+            'fecha': None
+        })
+
+    # Procedimientos no quirúrgicos
+    pattern_noqx = r'ORDENES DE PROCEDIMIENTOS NO QX\s*\n\s*(\d+)\s+([^\n]+)'
+    for match in re.finditer(pattern_noqx, texto, re.IGNORECASE):
+        procedimientos.append({
+            'tipo': 'no_quirurgico',
+            'cantidad': match.group(1).strip(),
+            'descripcion': match.group(2).strip(),
+            'fecha': None
+        })
+
+    # Intentar asociar fechas (buscar "Fecha y Hora de Aplicación" cerca)
+    for proc in procedimientos:
+        desc = proc['descripcion']
+        # Buscar en el texto circundante
+        idx = texto.find(desc)
+        if idx != -1:
+            ventana = texto[max(0, idx-200):idx+200]
+            fecha_match = re.search(r'Fecha y Hora de Aplicación:(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', ventana)
+            if fecha_match:
+                proc['fecha'] = fecha_match.group(1)
+                proc['hora'] = fecha_match.group(2)
+
+    return procedimientos
+
+def extraer_cirugias(texto):
+    """Extrae información detallada de cirugías (descripciones, participantes, etc.)"""
+    cirugias = []
+    # Busca bloques de DESCRIPCION CIRUGIA
+    patron = r'DESCRIPCION CIRUGIA.*?(?=\n[A-Z]{5,}\n|\Z)'
+    for bloque in re.finditer(patron, texto, re.DOTALL | re.IGNORECASE):
+        bloque_texto = bloque.group(0)
+        cirugia = {}
+
+        # Diagnóstico preoperatorio
+        pre = re.search(r'Diagnostico Preoperatorio:\s*([^\n]+)', bloque_texto)
+        if pre:
+            cirugia['diagnostico_pre'] = pre.group(1).strip()
+        # Diagnóstico postoperatorio
+        post = re.search(r'Diagnostico Postoperatorio:\s*([^\n]+)', bloque_texto)
+        if post:
+            cirugia['diagnostico_post'] = post.group(1).strip()
+        # Tipo de anestesia
+        anest = re.search(r'Tipo de Anestesia:\s*([^\n]+)', bloque_texto)
+        if anest:
+            cirugia['anestesia'] = anest.group(1).strip()
+        # Fecha
+        fecha = re.search(r'Realizacion Acto Quirurgico:\s*(\d{2}/\d{2}/\d{4})', bloque_texto)
+        if fecha:
+            cirugia['fecha'] = fecha.group(1)
+        # Hora inicio/fin
+        hora_inicio = re.search(r'Hora Inicio\s*(\d{2}:\d{2}:\d{2})', bloque_texto)
+        if hora_inicio:
+            cirugia['hora_inicio'] = hora_inicio.group(1)
+        hora_fin = re.search(r'Hora Final\s*(\d{2}:\d{2}:\d{2})', bloque_texto)
+        if hora_fin:
+            cirugia['hora_fin'] = hora_fin.group(1)
+        # Descripción quirúrgica
+        desc = re.search(r'Descripcion Quirurgica:\s*(.*?)(?=\nComplicacion:|\Z)', bloque_texto, re.DOTALL)
+        if desc:
+            cirugia['descripcion'] = desc.group(1).strip().replace('\n', ' ')
+        # Tejidos enviados a patología
+        tej = re.search(r'Tejidos enviados a patología\s*:\s*(.*?)(?=\n|$)', bloque_texto)
+        if tej:
+            cirugia['tejidos_patologia'] = tej.group(1).strip()
+        # Participantes
+        participantes = re.findall(r'CÓDIGO\s+([^\n]+)\n\s*([^\n]+)\s+TIPO\s+([^\n]+)\s+PARTICIPO\?\s*([^\n]+)', bloque_texto)
+        if participantes:
+            cirugia['participantes'] = [{'codigo': p[0], 'nombre': p[1], 'tipo': p[2], 'participo': p[3]} for p in participantes]
+
+        if cirugia:
+            cirugias.append(cirugia)
+
+    return cirugias
+
+def extraer_laboratorios(texto):
+    """Extrae órdenes de laboratorio y resultados."""
+    laboratorios = []
+    bloques = re.split(r'ORDENES DE LABORATORIO', texto)
+    for bloque in bloques[1:]:
+        fin = re.search(r'\n[A-Z ]{5,}\n', bloque)
+        if fin:
+            bloque = bloque[:fin.start()]
+        # Busca líneas con cantidad y descripción
+        lineas = bloque.split('\n')
+        i = 0
+        while i < len(lineas):
+            linea = lineas[i].strip()
+            if not linea:
+                i += 1
+                continue
+            if re.match(r'^\s*\d+\s+[A-Za-z]', linea):
+                partes = linea.split(maxsplit=1)
+                if len(partes) == 2:
+                    lab = {
+                        'cantidad': partes[0].strip(),
+                        'descripcion': partes[1].strip(),
+                        'fecha': None,
+                        'resultado': None
+                    }
+                    # Buscar fecha de aplicación
+                    for j in range(i, min(i+5, len(lineas))):
+                        if 'Fecha y Hora de Aplicación' in lineas[j]:
+                            fecha_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', lineas[j])
+                            if fecha_match:
+                                lab['fecha'] = fecha_match.group(1)
+                                lab['hora'] = fecha_match.group(2)
+                        if 'Resultados:' in lineas[j]:
+                            # Puede haber resultados en líneas siguientes
+                            k = j+1
+                            resultados = []
+                            while k < len(lineas) and not re.match(r'^\s*\d+\s+[A-Za-z]', lineas[k]) and not re.match(r'\n[A-Z ]{5,}\n', lineas[k]):
+                                res_linea = lineas[k].strip()
+                                if res_linea:
+                                    resultados.append(res_linea)
+                                k += 1
+                            if resultados:
+                                lab['resultado'] = ' '.join(resultados)
+                            break
+                    laboratorios.append(lab)
+            i += 1
+    return laboratorios
+
+def extraer_imagenes(texto):
+    """Extrae órdenes de imágenes diagnósticas y sus informes."""
+    imagenes = []
+    bloques = re.split(r'ORDENES DE IMAGENES DIAGNOSTICAS', texto)
+    for bloque in bloques[1:]:
+        fin = re.search(r'\n[A-Z ]{5,}\n', bloque)
+        if fin:
+            bloque = bloque[:fin.start()]
+        lineas = bloque.split('\n')
+        i = 0
+        while i < len(lineas):
+            linea = lineas[i].strip()
+            if not linea:
+                i += 1
+                continue
+            if re.match(r'^\s*\d+\s+[A-Za-z]', linea):
+                partes = linea.split(maxsplit=1)
+                if len(partes) == 2:
+                    img = {
+                        'cantidad': partes[0].strip(),
+                        'descripcion': partes[1].strip(),
+                        'fecha': None,
+                        'resultado': None
+                    }
+                    # Buscar fecha de aplicación
+                    for j in range(i, min(i+5, len(lineas))):
+                        if 'Fecha y Hora de Aplicación' in lineas[j]:
+                            fecha_match = re.search(r'(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2}:\d{2})', lineas[j])
+                            if fecha_match:
+                                img['fecha'] = fecha_match.group(1)
+                                img['hora'] = fecha_match.group(2)
+                        if 'Resultados:' in lineas[j]:
+                            k = j+1
+                            resultados = []
+                            while k < len(lineas) and not re.match(r'^\s*\d+\s+[A-Za-z]', lineas[k]) and not re.match(r'\n[A-Z ]{5,}\n', lineas[k]):
+                                res_linea = lineas[k].strip()
+                                if res_linea:
+                                    resultados.append(res_linea)
+                                k += 1
+                            if resultados:
+                                img['resultado'] = ' '.join(resultados)
+                            break
+                    imagenes.append(img)
+            i += 1
+    return imagenes
+
+def extraer_interconsultas(texto):
+    """Extrae solicitudes de interconsulta."""
+    interconsultas = []
+    patron = r'INTERCONSULTA POR:\s*([^\n]+)\s+Fecha de Orden:\s*(\d{2}/\d{2}/\d{4})'
+    for match in re.finditer(patron, texto, re.IGNORECASE):
+        interconsultas.append({
+            'especialidad': match.group(1).strip(),
+            'fecha_orden': match.group(2).strip()
+        })
+    return interconsultas
+
+def extraer_evoluciones(texto):
+    """Extrae notas de evolución (fecha, médico, texto)"""
+    evoluciones = []
+    patron = r'EVOLUCION MEDICO\s*\n(.*?)(?=\n[A-Z ]{5,}\n|\Z)'
+    for match in re.finditer(patron, texto, re.DOTALL | re.IGNORECASE):
+        bloque = match.group(1).strip()
+        # Buscar fecha
+        fecha = re.search(r'(\d{2}/\d{2}/\d{4})', bloque)
+        evoluciones.append({
+            'fecha': fecha.group(1) if fecha else None,
+            'texto': bloque
+        })
+    return evoluciones
+
+def extraer_altas(texto):
+    """Extrae información de alta médica."""
+    altas = []
+    patron = r'ALTA M[EÉ]DICA.*?(?=\n[A-Z ]{5,}\n|\Z)'
+    for match in re.finditer(patron, texto, re.DOTALL | re.IGNORECASE):
+        bloque = match.group(0)
+        fecha = re.search(r'(\d{2}/\d{2}/\d{4})', bloque)
+        altas.append({
+            'fecha': fecha.group(1) if fecha else None,
+            'info': bloque
+        })
+    return altas
+
+# ----------------------------------------------------------------------
+# Función principal de procesamiento
+# ----------------------------------------------------------------------
+def procesar_historia(texto):
+    texto = limpiar_texto(texto)
+    resultado = {
+        'paciente': extraer_paciente(texto),
+        'servicios': extraer_servicios(texto),
+        'diagnosticos': extraer_diagnosticos(texto),
+        'medicamentos': extraer_medicamentos(texto),
+        'procedimientos': extraer_procedimientos(texto),
+        'cirugias': extraer_cirugias(texto),
+        'laboratorios': extraer_laboratorios(texto),
+        'imagenes': extraer_imagenes(texto),
+        'interconsultas': extraer_interconsultas(texto),
+        'evoluciones': extraer_evoluciones(texto),
+        'altas': extraer_altas(texto)
+    }
+    return resultado
+
+# ----------------------------------------------------------------------
+# Interfaz de Streamlit
+# ----------------------------------------------------------------------
+st.set_page_config(page_title="Lector HC Preciso", page_icon="🩺", layout="wide")
+st.title("🩺 Lector de Historias Clínicas (Precisión Mejorada)")
+st.mark("Sube un archivo PDF de una historia clínica y obtén un reporte detallado con todos los elementos facturables.")
 
 MAX_MB = 200
 archivo_subido = st.file_uploader("Selecciona un archivo PDF", type="pdf")
@@ -159,93 +480,140 @@ if archivo_subido is not None:
     else:
         st.success(f"Archivo cargado: {archivo_subido.name} ({tamaño_mb:.2f} MB)")
 
-        if st.button("🔍 Procesar PDF"):
+        if st.button("🔍 Procesar PDF", type="primary"):
             with st.spinner("Extrayendo texto del PDF..."):
                 texto, num_paginas = extraer_texto_pdf(archivo_subido)
                 if texto is None:
                     st.stop()
                 st.info(f"Se extrajeron {num_paginas} páginas.")
 
-            with st.spinner("Analizando información..."):
-                texto_limpio = limpiar_texto(texto)
-                resultado = {
-                    'paciente': extraer_paciente(texto_limpio),
-                    'servicios': extraer_servicios(texto_limpio),
-                    'medicamentos': extraer_medicamentos(texto_limpio),
-                    'procedimientos': extraer_procedimientos(texto_limpio),
-                    'laboratorios': extraer_laboratorios(texto_limpio),
-                    'imagenes': extraer_imagenes(texto_limpio)
-                }
+            with st.spinner("Analizando información (esto puede tomar unos segundos)..."):
+                resultado = procesar_historia(texto)
 
-                st.success("✅ Extracción completada")
+            st.success("✅ Extracción completada")
 
-                # Mostrar datos del paciente
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write("**Paciente:**", resultado['paciente'].get('nombre', 'No encontrado'))
-                with col2:
-                    st.write("**Documento:**", resultado['paciente'].get('documento', 'No encontrado'))
+            # Mostrar datos del paciente
+            st.header("📋 Datos del paciente")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Nombre", resultado['paciente'].get('nombre', 'No encontrado'))
+            with col2:
+                st.metric("Documento", resultado['paciente'].get('documento', 'No encontrado'))
+            with col3:
+                st.metric("Edad", resultado['paciente'].get('edad', 'No encontrado'))
+            with col4:
+                st.metric("Teléfono", resultado['paciente'].get('telefono', 'No encontrado'))
 
-                # ---------- MEDICAMENTOS ----------
-                st.markdown("---")
-                st.subheader(f"💊 Medicamentos encontrados ({len(resultado['medicamentos'])})")
-                if resultado['medicamentos']:
-                    for med in resultado['medicamentos']:
-                        with st.container(border=True):
-                            cols = st.columns([1, 3, 2, 2])
-                            cols[0].write(f"**Cant:** {med['cantidad']}")
-                            cols[1].write(f"**{med['descripcion']}**")
-                            cols[2].write(f"Dosis: {med['dosis']}")
-                            cols[3].write(f"Frec: {med['frecuencia']}")
-                else:
-                    st.write("No se encontraron medicamentos.")
+            # Servicios
+            st.header(f"🏥 Servicios de atención ({len(resultado['servicios'])})")
+            if resultado['servicios']:
+                for s in resultado['servicios']:
+                    st.write(f"- **{s['tipo_atencion']}** en {s['sede_nombre']} ({s['fecha']} {s['hora']})")
+            else:
+                st.write("No se encontraron servicios.")
 
-                # ---------- PROCEDIMIENTOS ----------
-                st.markdown("---")
-                st.subheader(f"🩺 Procedimientos ({len(resultado['procedimientos'])})")
-                if resultado['procedimientos']:
-                    for proc in resultado['procedimientos']:
-                        st.write(f"- **{proc['descripcion']}** ({proc['tipo']}) – Cantidad: {proc['cantidad']}")
-                else:
-                    st.write("No se encontraron procedimientos.")
+            # Diagnósticos
+            st.header(f"📌 Diagnósticos ({len(resultado['diagnosticos'])})")
+            if resultado['diagnosticos']:
+                for d in resultado['diagnosticos']:
+                    st.write(f"- **{d['codigo']}** {d['descripcion']}")
+            else:
+                st.write("No se encontraron diagnósticos.")
 
-                # ---------- LABORATORIOS ----------
-                st.markdown("---")
-                st.subheader(f"🔬 Laboratorios ({len(resultado['laboratorios'])})")
-                if resultado['laboratorios']:
-                    for lab in resultado['laboratorios']:
-                        st.write(f"- **{lab['descripcion']}** (Cantidad: {lab['cantidad']})")
-                else:
-                    st.write("No se encontraron órdenes de laboratorio.")
+            # Medicamentos
+            st.header(f"💊 Medicamentos ({len(resultado['medicamentos'])})")
+            if resultado['medicamentos']:
+                for med in resultado['medicamentos']:
+                    with st.expander(f"{med['descripcion'][:80]}..."):
+                        st.write(f"**Cantidad:** {med['cantidad']}")
+                        st.write(f"**Dosis:** {med['dosis']}")
+                        st.write(f"**Vía:** {med['via']}")
+                        st.write(f"**Frecuencia:** {med['frecuencia']}")
+                        st.write(f"**Estado:** {med['estado']}")
+            else:
+                st.write("No se encontraron medicamentos.")
 
-                # ---------- IMÁGENES ----------
-                st.markdown("---")
-                st.subheader(f"📸 Imágenes diagnósticas ({len(resultado['imagenes'])})")
-                if resultado['imagenes']:
-                    for img in resultado['imagenes']:
-                        st.write(f"- **{img['descripcion']}** (Cantidad: {img['cantidad']})")
-                else:
-                    st.write("No se encontraron imágenes.")
+            # Procedimientos
+            st.header(f"🩺 Procedimientos ({len(resultado['procedimientos'])})")
+            if resultado['procedimientos']:
+                for p in resultado['procedimientos']:
+                    fecha = f" ({p['fecha']})" if p.get('fecha') else ""
+                    st.write(f"- **{p['descripcion']}** {fecha} – Cantidad: {p['cantidad']} ({p['tipo']})")
+            else:
+                st.write("No se encontraron procedimientos.")
 
-                # ---------- SERVICIOS (ESTANCIAS) ----------
-                st.markdown("---")
-                st.subheader(f"🏥 Servicios de atención ({len(resultado['servicios'])})")
-                if resultado['servicios']:
-                    for serv in resultado['servicios']:
-                        st.write(f"- **{serv['tipo_atencion']}** en {serv['sede_nombre']} ({serv['fecha']} {serv['hora']})")
-                else:
-                    st.write("No se encontraron registros de servicios.")
+            # Cirugías detalladas
+            st.header(f"🔪 Cirugías detalladas ({len(resultado['cirugias'])})")
+            if resultado['cirugias']:
+                for c in resultado['cirugias']:
+                    with st.expander(f"Cirugía del {c.get('fecha', 'desconocida')}"):
+                        st.write(f"**Diagnóstico preoperatorio:** {c.get('diagnostico_pre', 'N/A')}")
+                        st.write(f"**Diagnóstico postoperatorio:** {c.get('diagnostico_post', 'N/A')}")
+                        st.write(f"**Anestesia:** {c.get('anestesia', 'N/A')}")
+                        st.write(f"**Hora inicio:** {c.get('hora_inicio', 'N/A')} – **Hora fin:** {c.get('hora_fin', 'N/A')}")
+                        st.write(f"**Descripción:** {c.get('descripcion', 'N/A')}")
+                        st.write(f"**Tejidos a patología:** {c.get('tejidos_patologia', 'N/A')}")
+                        if 'participantes' in c:
+                            st.write("**Participantes:**")
+                            for part in c['participantes']:
+                                st.write(f"  - {part['nombre']} ({part['tipo']})")
+            else:
+                st.write("No se encontraron descripciones quirúrgicas detalladas.")
 
-                # ---------- JSON COMPLETO PARA DESCARGA ----------
-                st.markdown("---")
-                st.subheader("📦 JSON completo")
-                st.json(resultado)
+            # Laboratorios
+            st.header(f"🔬 Laboratorios ({len(resultado['laboratorios'])})")
+            if resultado['laboratorios']:
+                for lab in resultado['laboratorios']:
+                    fecha = f" ({lab['fecha']})" if lab.get('fecha') else ""
+                    with st.expander(f"{lab['descripcion']}{fecha}"):
+                        st.write(f"**Cantidad:** {lab['cantidad']}")
+                        if lab.get('resultado'):
+                            st.write(f"**Resultado:** {lab['resultado']}")
+            else:
+                st.write("No se encontraron órdenes de laboratorio.")
 
-                # Botón de descarga
-                json_str = json.dumps(resultado, indent=2, ensure_ascii=False)
-                st.download_button(
-                    label="📥 Descargar JSON",
-                    data=json_str,
-                    file_name=f"{archivo_subido.name.replace('.pdf', '')}_reporte.json",
-                    mime="application/json"
-                )
+            # Imágenes
+            st.header(f"📸 Imágenes diagnósticas ({len(resultado['imagenes'])})")
+            if resultado['imagenes']:
+                for img in resultado['imagenes']:
+                    fecha = f" ({img['fecha']})" if img.get('fecha') else ""
+                    with st.expander(f"{img['descripcion']}{fecha}"):
+                        st.write(f"**Cantidad:** {img['cantidad']}")
+                        if img.get('resultado'):
+                            st.write(f"**Resultado:** {img['resultado']}")
+            else:
+                st.write("No se encontraron imágenes.")
+
+            # Interconsultas
+            st.header(f"📞 Interconsultas ({len(resultado['interconsultas'])})")
+            if resultado['interconsultas']:
+                for ic in resultado['interconsultas']:
+                    st.write(f"- **{ic['especialidad']}** (orden: {ic['fecha_orden']})")
+            else:
+                st.write("No se encontraron interconsultas.")
+
+            # Evoluciones (resumen)
+            st.header(f"📝 Evoluciones ({len(resultado['evoluciones'])})")
+            if resultado['evoluciones']:
+                st.write(f"Se encontraron {len(resultado['evoluciones'])} notas de evolución.")
+                # Podríamos mostrar un resumen, pero puede ser mucho texto
+            else:
+                st.write("No se encontraron notas de evolución.")
+
+            # Altas
+            st.header(f"🚪 Altas ({len(resultado['altas'])})")
+            if resultado['altas']:
+                for a in resultado['altas']:
+                    st.write(f"- Alta del {a['fecha']}")
+            else:
+                st.write("No se encontraron registros de alta.")
+
+            # JSON completo
+            st.header("📦 JSON completo")
+            json_str = json.dumps(resultado, indent=2, ensure_ascii=False, default=str)
+            st.download_button(
+                label="📥 Descargar JSON",
+                data=json_str,
+                file_name=f"{archivo_subido.name.replace('.pdf', '')}_reporte_detallado.json",
+                mime="application/json"
+            )
